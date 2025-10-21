@@ -27,9 +27,9 @@
       MODE: (S?.getAttribute('data-mode') || 'limited').toLowerCase(),
       BASE: trimSlash(S?.getAttribute('data-base') || ''),
       SITE: S?.getAttribute('data-site') || location.hostname,
-      WS_ANON: S?.getAttribute('data-ws-anon') || '/api/v1/workflows/pulse/anon',
-      WS_SESS: S?.getAttribute('data-ws-sess') || '/api/v1/workflows/pulse/session',
-      WS_LEAD: S?.getAttribute('data-ws-lead') || '/api/v1/workflows/pulse/lead',
+      WS_ANON: S?.getAttribute('data-ws-anon') || '/pulse/anon',
+      WS_SESS: S?.getAttribute('data-ws-sess') || '/pulse/session',
+      WS_LEAD: S?.getAttribute('data-ws-lead') || '/pulse/lead',
       SESSION_TIMEOUT: toInt(S?.getAttribute('data-session-timeout'), 1800)
     };
     if (!CFG.BASE) console.warn('[Pulse] missing data-base');
