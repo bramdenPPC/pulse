@@ -4,6 +4,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.1] - 2025-10-22
+### Changed
+- Removed redundant `anon_id` and `session_id` fields from `form_data` to prevent duplication.  
+  → These identifiers remain available at the top level of all events.
+- Further refined form serialization cleanup for consistency with attribution schema.
+- Minor documentation updates and inline comments for clarity.
+
+
+---
+
 ## [1.3] - 2025-10-22
 ### Added
 - Introduced unified **`pulse_type`** field (`anon`, `session`, `lead`) across all events for simpler querying and event stitching in Fabric.
