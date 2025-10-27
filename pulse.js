@@ -1,5 +1,5 @@
 /* =========================================================================
-   Pulse v1.3.10
+   Pulse v1.3.11
    Unified tracking layer for anon/session_start/page_view/lead events.
    -------------------------------------------------------------------------
    • Consent gated
@@ -9,10 +9,11 @@
    • Links lead → last pageview via sessionStorage
    • No first_seen_ts
    • Uses page_path / page_referrer / page_title naming
+   • Adds lead_id as hidden input to form before submission
    ========================================================================= */
 
 (function () {
-  const VERSION = '1.3.10';
+  const VERSION = '1.3.11';
   const DEBUG = true;
 
   const log  = (...a)=>DEBUG&&console.log(`[Pulse v${VERSION}]`, ...a);
@@ -212,20 +213,33 @@
       sendJSON(CFG.BASE + CFG.WS_PAGEVIEW, pvPayload);
     })();
 
+    // --- Lead submission tracking ---
     document.addEventListener('submit', function(ev){
       const form = ev.target;
       if (!(form instanceof HTMLFormElement)) return;
+
+      // persistent IDs
       ensureHidden(form, 'anon_id', anon_id);
       ensureHidden(form, 'session_id', sess_id);
+
+      // generate + attach lead_id
+      const lead_id = 'lead_' + uuidv4();
+      ensureHidden(form, 'lead_id', lead_id);
+
+      // link to last page_view
       const lastPV = sessionStorage.getItem('pulse_last_pv') || null;
+
       const payload = {
         pulse_type: 'lead',
         created_at: iso(),
         pulse_version: VERSION,
-        anon_id, session_id: sess_id, pageview_id: lastPV,
-        lead_id: 'lead_' + uuidv4(),
+        anon_id,
+        session_id: sess_id,
+        pageview_id: lastPV,
+        lead_id,
         user_agent: navigator.userAgent || '',
-        ...pageMeta(), ...extractTid(),
+        ...pageMeta(),
+        ...extractTid(),
         form_data: serializeForm(form),
         mode: CFG.MODE
       };
