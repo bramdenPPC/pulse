@@ -1,23 +1,24 @@
 /* =========================================================================
-   Pulse v1.4.2
+   Pulse v1.3.3
    Unified tracking layer for anon/page_view/lead events via n8n → Fabric.
    -------------------------------------------------------------------------
    Key behaviours:
-   • Consent-gated (requires window.PulseConsent === true OR "pulse:consent")
+   • Consent-gated (requires window.PulseConsent === true OR "pulse:consent" event)
    • Hybrid ID storage (anon_id = localStorage + cookie mirror, sess_id = cookie)
-   • Fires anon, session_start, page_view, and lead events
-   • Responds to "pulse:revoke" to clear identifiers
-   • Consistent payload fields across all events
-   • DEBUG flag for logging control
+   • Fires anon, page_view, and lead events
+   • Generates new session_id when expired (used across events)
+   • Always allows native form submission
+   • Adds viewport/language/title/device_type context
+   • DEBUG toggle + pulse:revoke listener
    ========================================================================= */
 
 (function () {
 
   // ---- Toggle console logging ----
   const DEBUG = true; // ← set false in production
-  const log  = (...a) => DEBUG && console.log(...a);
-  const info = (...a) => DEBUG && console.info(...a);
-  const warn = (...a) => DEBUG && console.warn(...a);
+  const log  = (...a)=>DEBUG&&console.log(...a);
+  const info = (...a)=>DEBUG&&console.info(...a);
+  const warn = (...a)=>DEBUG&&console.warn(...a);
 
   // ---- Consent gate ----
   if (window.PulseConsent !== true) {
@@ -27,16 +28,14 @@
 
   // ---- Revoke listener ----
   window.addEventListener('pulse:revoke', () => {
-    if (window.Pulse) {
-      info('[Pulse] revoke event received → clearing identifiers');
-      window.Pulse.reset();
-    }
+    info('[Pulse] revoke event → clearing identifiers');
+    window.Pulse?.reset();
   });
 
   function initPulse() {
     info('[Pulse] initialising...');
 
-    // ---- Config ----
+    // ---- read config from script tag ----
     const S = document.currentScript || document.querySelector('script[src*="pulse.js"]');
     const CFG = {
       MODE: (S?.getAttribute('data-mode') || 'limited').toLowerCase(),
@@ -44,13 +43,12 @@
       SITE: S?.getAttribute('data-site') || location.hostname,
       WS_ANON: S?.getAttribute('data-ws-anon') || '/pulse/anon',
       WS_PAGEVIEW: S?.getAttribute('data-ws-pageview') || '/pulse/page_view',
-      WS_SESS_START: S?.getAttribute('data-ws-session-start') || '/pulse/session_start',
       WS_LEAD: S?.getAttribute('data-ws-lead') || '/pulse/lead',
       SESSION_TIMEOUT: toInt(S?.getAttribute('data-session-timeout'), 1800)
     };
-    if (!CFG.BASE) warn('[Pulse] missing data-base attribute');
+    if (!CFG.BASE) warn('[Pulse] missing data-base');
 
-    // ---- Helpers ----
+    // ---- utility helpers ----
     function trimSlash(s){ return s ? s.replace(/\/+$/,'') : s; }
     function toInt(v,d){ v=parseInt(v,10); return isNaN(v)?d:v; }
     function iso(){ return new Date().toISOString(); }
@@ -75,12 +73,14 @@
     // ---- ID management ----
     function getAnonId() {
       try {
+        let id = localStorage.getItem('pulse_anon');
         const cookieId = readCookie('pulse_anon');
-        if (cookieId) {
-          log('[Pulse] existing anon_id:', cookieId);
-          return cookieId;
+        if (id && !cookieId) {
+          writeCookie('pulse_anon', id, 365);
+          return id;
         }
-        const id = 'anon_' + uuidv4();
+        if (id) return id;
+        id = 'anon_' + uuidv4();
         localStorage.setItem('pulse_anon', id);
         writeCookie('pulse_anon', id, 365);
         info('[Pulse] new anon_id created:', id);
@@ -99,9 +99,8 @@
       if (expired) {
         sess = 'sess_' + uuidv4();
         writeCookie('pulse_sess', sess, 1);
-        info('[Pulse] new session started:', sess);
-        sendSessionStart(sess);
-      } else log('[Pulse] existing session_id:', sess);
+        info('[Pulse] new session_id generated:', sess);
+      }
       writeCookie('pulse_sess_at', String(now), 1);
       return sess;
     }
@@ -109,12 +108,10 @@
     const anon_id = getAnonId();
     const sess_id = getSessId(CFG.SESSION_TIMEOUT);
 
-    // ---- Network helper ----
-    function sendJSON(endpoint, payload){
+    // ---- network helpers ----
+    function sendJSON(url, payload){
       if (!CFG.BASE) return Promise.resolve();
-      const url = CFG.BASE + endpoint;
-      const body = JSON.stringify(payload, null, DEBUG ? 2 : 0);
-      log('[Pulse] sending →', url, payload);
+      const body = JSON.stringify(payload);
       try {
         if (navigator.sendBeacon && navigator.sendBeacon(url, body)) {
           info('[Pulse] beacon sent →', url);
@@ -132,11 +129,11 @@
           mode:'no-cors'
         });
         log('[Pulse] fetch fallback →', url);
-      } catch (err) { warn('[Pulse] fetch failed', err); }
+      } catch (err) { warn('[Pulse] fetch failed silently', err); }
       return Promise.resolve({ ok:true, fetch:true });
     }
 
-    // ---- Context helpers ----
+    // ---- context helpers ----
     function pageMeta(){
       const u = new URL(location.href);
       const utm = {};
@@ -146,8 +143,8 @@
       return {
         domain: location.hostname,
         referrer: document.referrer || '',
-        title: document.title || '',
         landing_page: location.pathname + location.search + location.hash,
+        title: document.title || '',
         viewport: `${window.innerWidth}x${window.innerHeight}`,
         language: navigator.language || '',
         device_type: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop',
@@ -162,70 +159,47 @@
         fbclid:'meta_ads', ttclid:'tiktok_ads', li_fat_id:'linkedin_ads',
         msclkid:'microsoft_ads', snap_clickid:'snap_ads', ad_id:'generic'
       };
-      for (const k in map) if (p.has(k)) {
-        log('[Pulse] found tracking id →', k, p.get(k));
-        return { tid:p.get(k), tid_p:map[k] };
-      }
+      for (const k in map) if (p.has(k)) return { tid:p.get(k), tid_p:map[k] };
       return {};
     }
 
-    // ---- Event emitters ----
-    function sendAnonEvent() {
-      const payload = {
-        pulse_type: 'anon',
-        anon_id,
-        session_id: sess_id,
-        created_at: iso(),
-        first_seen_ts: iso(),
-        user_agent: navigator.userAgent || '',
-        domain: CFG.SITE,
-        mode: CFG.MODE,
-        pulse_version: '1.4.2'
-      };
-      info('[Pulse] firing anon event');
-      sendJSON(CFG.WS_ANON, payload);
-    }
+    // ---- emitters ----
+    (function emitAnonAndPageView(){
+      // anon event (once per browser)
+      if (!readCookie('pulse_seen')) {
+        writeCookie('pulse_seen','1',365);
+        const anonPayload = {
+          pulse_type: 'anon',
+          anon_id,
+          session_id: sess_id,
+          created_at: iso(),
+          first_seen_ts: iso(),
+          user_agent: navigator.userAgent || '',
+          domain: CFG.SITE,
+          mode: CFG.MODE
+        };
+        info('[Pulse] firing anon event');
+        sendJSON(CFG.BASE + CFG.WS_ANON, anonPayload);
+      }
 
-    function sendSessionStart(sess_id){
-      const payload = {
-        pulse_type: 'session_start',
-        anon_id,
-        session_id: sess_id,
-        created_at: iso(),
-        first_seen_ts: iso(),
-        user_agent: navigator.userAgent || '',
-        domain: CFG.SITE,
-        mode: CFG.MODE,
-        pulse_version: '1.4.2'
-      };
-      info('[Pulse] firing session_start event');
-      sendJSON(CFG.WS_SESS_START, payload);
-    }
-
-    (function emitPageView(){
+      // page_view event (fires every page load)
       const meta = pageMeta();
       const tid = extractTid();
-      const payload = {
+      const pvPayload = {
         pulse_type: 'page_view',
-        pageview_id: 'pv_' + uuidv4(),
-        anon_id,
         session_id: sess_id,
-        created_at: iso(),
+        anon_id,
         first_seen_ts: iso(),
-        user_agent: navigator.userAgent || '',
+        created_at: iso(),
         ...meta, ...tid,
-        mode: CFG.MODE,
-        pulse_version: '1.4.2'
+        mode: CFG.MODE
       };
       info('[Pulse] firing page_view event');
-      sendJSON(CFG.WS_PAGEVIEW, payload);
+      sendJSON(CFG.BASE + CFG.WS_PAGEVIEW, pvPayload);
     })();
 
-    // ---- Fire anon once per new anon_id ----
-    if (!readCookie('pulse_anon')) sendAnonEvent();
-
-    // ---- Form submission tracking ----
-    document.addEventListener('submit', ev => {
+    // ---- form submission tracking ----
+    document.addEventListener('submit', function(ev){
       const form = ev.target;
       if (!(form instanceof HTMLFormElement)) return;
       ensureHidden(form, 'anon_id', anon_id);
@@ -236,21 +210,17 @@
         lead_id: 'lead_' + uuidv4(),
         anon_id,
         session_id: sess_id,
-        pageview_id: 'pv_' + uuidv4(),
         created_at: iso(),
-        first_seen_ts: iso(),
-        user_agent: navigator.userAgent || '',
         ...pageMeta(),
         ...extractTid(),
         form_data: serializeForm(form),
-        mode: CFG.MODE,
-        pulse_version: '1.4.2'
+        mode: CFG.MODE
       };
-      info('[Pulse] lead form submission detected → firing lead event');
-      sendJSON(CFG.WS_LEAD, payload);
+      info('[Pulse] firing lead event');
+      sendJSON(CFG.BASE + CFG.WS_LEAD, payload);
     }, true);
 
-    // ---- Form helpers ----
+    // ---- helpers ----
     function serializeForm(form){
       const fd = new FormData(form);
       const out = {};
@@ -275,12 +245,12 @@
       el.value = value;
     }
 
-    // ---- Public API ----
+    // ---- public API ----
     window.Pulse = {
       reset: function(){
         try {
           localStorage.removeItem('pulse_anon');
-          ['pulse_anon','pulse_sess','pulse_sess_at'].forEach(n=>{
+          ['pulse_anon','pulse_sess','pulse_sess_at','pulse_seen'].forEach(n=>{
             writeCookie(n,'',-1);
           });
           info('[Pulse] identifiers cleared');
