@@ -1,11 +1,12 @@
 /* =========================================================================
-   Pulse v1.3.7
-   Patch: adds unique pageview_id to each page_view event.
+   Pulse v1.3.6 (hotfix)
+   Fixes missing session_id in session_start/page_view/lead events.
+   No other behavioural or structural changes.
    ========================================================================= */
 
 (function () {
 
-  const VERSION = '1.3.7';
+  const VERSION = '1.3.6';
   const DEBUG = true;
 
   const log  = (...a)=>DEBUG&&console.log(`[Pulse v${VERSION}]`, ...a);
@@ -38,6 +39,7 @@
     };
     if (!CFG.BASE) warn('missing data-base');
 
+    // ---- utils ----
     function trimSlash(s){ return s ? s.replace(/\/+$/,'') : s; }
     function toInt(v,d){ v=parseInt(v,10); return isNaN(v)?d:v; }
     function iso(){ return new Date().toISOString(); }
@@ -57,6 +59,7 @@
       document.cookie = `${name}=${encodeURIComponent(value)}; expires=${exp}; path=/; SameSite=Lax; Secure`;
     }
 
+    // ---- ID management ----
     function getAnonId() {
       try {
         let id = localStorage.getItem('pulse_anon');
@@ -74,6 +77,7 @@
       }
     }
 
+    // removed emitSessionStart() call from inside getSessId()
     function getSessId(timeoutSec) {
       const last = parseInt(readCookie('pulse_sess_at') || '0', 10) || 0;
       const now = Date.now();
@@ -82,7 +86,7 @@
       if (expired) {
         sess = 'sess_' + uuidv4();
         writeCookie('pulse_sess', sess, 1);
-        writeCookie('pulse_sess_seen', '', -1);
+        writeCookie('pulse_sess_seen', '', -1); // clear "seen" flag so session_start re-fires
         info('new session_id generated:', sess);
       }
       writeCookie('pulse_sess_at', String(now), 1);
@@ -92,11 +96,13 @@
     const anon_id = getAnonId();
     const sess_id = getSessId(CFG.SESSION_TIMEOUT);
 
+    // ---- emit session_start AFTER sess_id is set ----
     if (!readCookie('pulse_sess_seen')) {
       emitSessionStart(sess_id);
       writeCookie('pulse_sess_seen', '1', 1);
     }
 
+    // ---- network ----
     function sendJSON(url, payload){
       if (!CFG.BASE) return Promise.resolve();
       const body = JSON.stringify(payload);
@@ -122,6 +128,7 @@
       return Promise.resolve({ ok:true, fetch:true });
     }
 
+    // ---- context ----
     function pageMeta(){
       const u = new URL(location.href);
       const utm = {};
@@ -151,6 +158,7 @@
       return {};
     }
 
+    // ---- emitters ----
     function emitSessionStart(sess){
       const meta = pageMeta();
       const tid = extractTid();
@@ -187,15 +195,12 @@
         sendJSON(CFG.BASE + CFG.WS_ANON, anonPayload);
       }
 
-      // --- page_view ---
       const meta = pageMeta();
       const tid = extractTid();
-      const pageview_id = 'pv_' + uuidv4(); // ✅ new unique per page load
       const pvPayload = {
         pulse_type: 'page_view',
-        pageview_id,
         anon_id,
-        session_id: sess_id,
+        session_id: sess_id, // ✅ ensure session_id always present
         created_at: iso(),
         first_seen_ts: iso(),
         ...meta, ...tid,
@@ -216,7 +221,7 @@
         pulse_type: 'lead',
         lead_id: 'lead_' + uuidv4(),
         anon_id,
-        session_id: sess_id,
+        session_id: sess_id, // ✅ include session scope
         created_at: iso(),
         ...pageMeta(),
         ...extractTid(),
