@@ -1,30 +1,23 @@
 /* =========================================================================
-   Pulse v1.3.5
-   Unified tracking layer for anon/session_start/page_view/lead events via n8n → Fabric.
-   -------------------------------------------------------------------------
-   • Consent-gated (requires window.PulseConsent === true OR "pulse:consent" event)
-   • Hybrid ID storage (anon_id = localStorage + cookie mirror, sess_id = cookie)
-   • Fires anon (once), session_start (on new session), page_view (each load), and lead (on form submit)
-   • Adds viewport/language/title/device_type context
-   • DEBUG toggle + pulse:revoke listener
+   Pulse v1.3.6 (hotfix)
+   Fixes missing session_id in session_start/page_view/lead events.
+   No other behavioural or structural changes.
    ========================================================================= */
 
 (function () {
 
-  const VERSION = '1.3.5';
-  const DEBUG = true; // ← set false in production
+  const VERSION = '1.3.6';
+  const DEBUG = true;
 
   const log  = (...a)=>DEBUG&&console.log(`[Pulse v${VERSION}]`, ...a);
   const info = (...a)=>DEBUG&&console.info(`[Pulse v${VERSION}]`, ...a);
   const warn = (...a)=>DEBUG&&console.warn(`[Pulse v${VERSION}]`, ...a);
 
-  // ---- Consent gate ----
   if (window.PulseConsent !== true) {
     info('waiting for consent...');
     window.addEventListener('pulse:consent', () => initPulse(), { once: true });
   } else initPulse();
 
-  // ---- Revoke listener ----
   window.addEventListener('pulse:revoke', () => {
     info('revoke event → clearing identifiers');
     window.Pulse?.reset();
@@ -33,7 +26,6 @@
   function initPulse() {
     info('initialising...');
 
-    // ---- read config ----
     const S = document.currentScript || document.querySelector('script[src*="pulse.js"]');
     const CFG = {
       MODE: (S?.getAttribute('data-mode') || 'limited').toLowerCase(),
@@ -85,6 +77,7 @@
       }
     }
 
+    // removed emitSessionStart() call from inside getSessId()
     function getSessId(timeoutSec) {
       const last = parseInt(readCookie('pulse_sess_at') || '0', 10) || 0;
       const now = Date.now();
@@ -93,8 +86,8 @@
       if (expired) {
         sess = 'sess_' + uuidv4();
         writeCookie('pulse_sess', sess, 1);
+        writeCookie('pulse_sess_seen', '', -1); // clear "seen" flag so session_start re-fires
         info('new session_id generated:', sess);
-        emitSessionStart(sess);
       }
       writeCookie('pulse_sess_at', String(now), 1);
       return sess;
@@ -102,6 +95,12 @@
 
     const anon_id = getAnonId();
     const sess_id = getSessId(CFG.SESSION_TIMEOUT);
+
+    // ---- emit session_start AFTER sess_id is set ----
+    if (!readCookie('pulse_sess_seen')) {
+      emitSessionStart(sess_id);
+      writeCookie('pulse_sess_seen', '1', 1);
+    }
 
     // ---- network ----
     function sendJSON(url, payload){
@@ -179,7 +178,6 @@
     }
 
     (function emitAnonAndPageView(){
-      // anon (once per browser)
       if (!readCookie('pulse_seen')) {
         writeCookie('pulse_seen','1',365);
         const anonPayload = {
@@ -197,13 +195,12 @@
         sendJSON(CFG.BASE + CFG.WS_ANON, anonPayload);
       }
 
-      // page_view (each load)
       const meta = pageMeta();
       const tid = extractTid();
       const pvPayload = {
         pulse_type: 'page_view',
         anon_id,
-        session_id: sess_id,
+        session_id: sess_id, // ✅ ensure session_id always present
         created_at: iso(),
         first_seen_ts: iso(),
         ...meta, ...tid,
@@ -214,7 +211,6 @@
       sendJSON(CFG.BASE + CFG.WS_PAGEVIEW, pvPayload);
     })();
 
-    // ---- form → lead ----
     document.addEventListener('submit', function(ev){
       const form = ev.target;
       if (!(form instanceof HTMLFormElement)) return;
@@ -225,7 +221,7 @@
         pulse_type: 'lead',
         lead_id: 'lead_' + uuidv4(),
         anon_id,
-        session_id: sess_id,
+        session_id: sess_id, // ✅ include session scope
         created_at: iso(),
         ...pageMeta(),
         ...extractTid(),
@@ -237,7 +233,6 @@
       sendJSON(CFG.BASE + CFG.WS_LEAD, payload);
     }, true);
 
-    // ---- helpers ----
     function serializeForm(form){
       const fd = new FormData(form);
       const out = {};
@@ -262,12 +257,11 @@
       el.value = value;
     }
 
-    // ---- public API ----
     window.Pulse = {
       reset: function(){
         try {
           localStorage.removeItem('pulse_anon');
-          ['pulse_anon','pulse_sess','pulse_sess_at','pulse_seen'].forEach(n=>{
+          ['pulse_anon','pulse_sess','pulse_sess_at','pulse_seen','pulse_sess_seen'].forEach(n=>{
             writeCookie(n,'',-1);
           });
           info('identifiers cleared');
