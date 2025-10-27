@@ -1,5 +1,5 @@
 /* =========================================================================
-   Pulse v1.3.9
+   Pulse v1.3.10
    Unified tracking layer for anon/session_start/page_view/lead events.
    -------------------------------------------------------------------------
    • Consent gated
@@ -8,10 +8,11 @@
    • Slimmer page_view events (no UTM/device duplication)
    • Links lead → last pageview via sessionStorage
    • No first_seen_ts
+   • Uses page_path / page_referrer / page_title naming
    ========================================================================= */
 
 (function () {
-  const VERSION = '1.3.9';
+  const VERSION = '1.3.10';
   const DEBUG = true;
 
   const log  = (...a)=>DEBUG&&console.log(`[Pulse v${VERSION}]`, ...a);
@@ -140,9 +141,9 @@
       const parsed = parseUA(ua);
       return {
         domain: location.hostname,
-        referrer: document.referrer || '',
-        landing_page: location.pathname + location.search + location.hash,
-        title: document.title || '',
+        page_referrer: document.referrer || '',
+        page_path: location.pathname + location.search + location.hash,
+        page_title: document.title || '',
         viewport: `${window.innerWidth}x${window.innerHeight}`,
         language: navigator.language || '',
         device_type: /Mobi|Android/i.test(ua) ? 'mobile' : 'desktop',
@@ -201,9 +202,9 @@
         created_at: iso(),
         pulse_version: VERSION,
         anon_id, session_id: sess_id, pageview_id,
-        title: document.title || '',
-        referrer: document.referrer || '',
-        landing_page: location.pathname + location.search + location.hash,
+        page_title: document.title || '',
+        page_referrer: document.referrer || '',
+        page_path: location.pathname + location.search + location.hash,
         viewport: `${window.innerWidth}x${window.innerHeight}`,
         domain: location.hostname,
         mode: CFG.MODE
